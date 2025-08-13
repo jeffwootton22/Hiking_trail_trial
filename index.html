@@ -1,16 +1,15 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Loch Leven – Hiking Map</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <style>
-    html, body, #map { height: 100%; margin: 0; }
-    .msg { position:absolute; top:10px; left:10px; background:#fff; padding:6px 8px; border-radius:6px; box-shadow:0 1px 6px rgba(0,0,0,.15); font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
-    .legend { position:absolute; bottom:12px; left:12px; background:#fff; padding:6px 8px; border-radius:6px; box-shadow:0 1px 6px rgba(0,0,0,.15); }
-    .swatch { display:inline-block; width:18px; height:3px; background:#e74c3c; margin-right:6px; vertical-align:middle; }
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Loch Leven – Hiking Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  html,body,#map{height:100%;margin:0}
+  .msg{position:absolute;top:10px;left:10px;background:#fff;padding:6px 8px;border-radius:6px;
+       box-shadow:0 1px 6px rgba(0,0,0,.15);font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:90vw}
+</style>
 </head>
 <body>
 <div id="map"></div>
@@ -18,45 +17,111 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-  const map = L.map('map').setView([37.7749, -122.4194], 12);
+  // Start roughly near Loch Leven (we'll auto-fit once the trail loads)
+  const map = L.map('map').setView([39.32, -120.54], 11);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
-  L.control.scale({ metric:false }).addTo(map);
+  L.control.scale({metric:false}).addTo(map);
 
   const showMsg = (t) => { const el = document.getElementById('msg'); el.textContent = t; el.style.display = 'block'; };
 
-  // GeoJSON sits in the repo root
   const GEOJSON_URL = './loch.levens.geojson?v=' + Date.now(); // cache-bust while iterating
+
+  // --- Helpers to detect & fix swapped [lat, lon] -> [lon, lat] ---
+  const likelySwapped = (lon, lat) => {
+    // Correct lon should be ~ -180..180; lat ~ -90..90
+    // If "lon" is in -90..90 and "lat" is outside that (e.g., ~120), it's probably swapped.
+    if (lon == null || lat == null) return false;
+    const absLon = Math.abs(lon), absLat = Math.abs(lat);
+    return absLon <= 90 && absLat > 90 && absLat <= 180;
+  };
+
+  const swapCoordsDeep = (geom) => {
+    const swapPair = (p) => [p[1], p[0]];
+    const mapCoords = (arr, depth=0) =>
+      Array.isArray(arr[0])
+        ? arr.map(a => mapCoords(a, depth+1))
+        : (arr.length >= 2 ? swapPair(arr) : arr);
+
+    switch (geom.type) {
+      case 'Point': return { ...geom, coordinates: swapPair(geom.coordinates) };
+      case 'MultiPoint':
+      case 'LineString': return { ...geom, coordinates: geom.coordinates.map(swapPair) };
+      case 'MultiLineString':
+      case 'Polygon': return { ...geom, coordinates: geom.coordinates.map(r => r.map(swapPair)) };
+      case 'MultiPolygon': return { ...geom, coordinates: geom.coordinates.map(p => p.map(r => r.map(swapPair))) };
+      case 'GeometryCollection': return { ...geom, geometries: geom.geometries.map(g => swapCoordsDeep(g)) };
+      default: return geom;
+    }
+  };
+
+  const maybeFixSwapped = (geo) => {
+    // Probe the first coordinate we can find
+    const probe = (g) => {
+      if (!g) return null;
+      if (g.type === 'Point') return g.coordinates;
+      if (g.type === 'MultiPoint' || g.type === 'LineString') return g.coordinates?.[0];
+      if (g.type === 'MultiLineString' || g.type === 'Polygon') return g.coordinates?.[0]?.[0];
+      if (g.type === 'MultiPolygon') return g.coordinates?.[0]?.[0]?.[0];
+      if (g.type === 'GeometryCollection') return probe(g.geometries?.[0]);
+      return null;
+    };
+
+    const fixFeature = (f) => ({ ...f, geometry: swapCoordsDeep(f.geometry) });
+
+    if (geo.type === 'FeatureCollection') {
+      const first = geo.features?.[0]?.geometry ? probe(geo.features[0].geometry) : null;
+      if (first && likelySwapped(first[0], first[1])) {
+        return { ...geo, features: geo.features.map(f => fixFeature(f)) };
+      }
+      return geo;
+    } else if (geo.type === 'Feature') {
+      const first = probe(geo.geometry);
+      if (first && likelySwapped(first[0], first[1])) {
+        return { ...geo, geometry: swapCoordsDeep(geo.geometry) };
+      }
+      return geo;
+    } else {
+      const first = probe(geo);
+      if (first && likelySwapped(first[0], first[1])) {
+        return swapCoordsDeep(geo);
+      }
+      return geo;
+    }
+  };
 
   fetch(GEOJSON_URL)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status} loading ${GEOJSON_URL}`); return r.json(); })
-    .then(geo => {
-      const trail = L.geoJSON(geo, {
-        style: { color:'#e74c3c', weight:3 },
-        onEachFeature: (f, layer) => {
-          const name = f?.properties?.name || 'Trail';
-          layer.bindPopup(name);
-        }
+    .then(raw => {
+      const fixed = maybeFixSwapped(raw);
+
+      const trail = L.geoJSON(fixed, {
+        style: { color:'#e74c3c', weight:3 }
       }).addTo(map);
 
+      // Debug info
+      let featureCount = 0;
+      if (fixed.type === 'FeatureCollection') featureCount = fixed.features?.length || 0;
+      else featureCount = 1;
+
+      // Try fitBounds
       const b = trail.getBounds();
-      if (b.isValid()) map.fitBounds(b, { padding:[20,20] });
-      else showMsg('Loaded GeoJSON but it has no visible geometry (empty or out of range).');
+      if (b && b.isValid()) {
+        map.fitBounds(b, { padding:[20,20] });
+        const c = b.getCenter();
+        showMsg(`Loaded ${featureCount} feature(s). Center ~ ${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}.`);
+      } else {
+        showMsg('Loaded GeoJSON, but no visible geometry to fit. Check projection and coordinates.');
+      }
     })
     .catch(err => {
       console.error(err);
-      showMsg('Could not load loch.levens.geojson. Check filename, path, and that it’s valid GeoJSON.');
+      showMsg('Could not load loch.levens.geojson. Verify the filename/path and that it is valid GeoJSON in WGS84.');
+      // Draw a tiny demo line so you can tell the map code is fine
+      L.geoJSON({"type":"LineString","coordinates":[[-120.55,39.32],[-120.52,39.33]]},
+        { style:{color:'#e74c3c',weight:3} }).addTo(map);
     });
-
-  // Tiny legend
-  const legend = L.control({ position:'bottomleft' });
-  legend.onAdd = () => {
-    const div = L.DomUtil.create('div', 'legend');
-    div.innerHTML = '<div><span class="swatch"></span>Hiking trail</div>';
-    return div;
-  };
-  legend.addTo(map);
 </script>
 </body>
 </html>
