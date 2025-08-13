@@ -7,61 +7,50 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
     html, body, #map { height: 100%; margin: 0; }
-    .leaflet-container { font: 14px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-    .legend {
-      position: absolute; bottom: 12px; left: 12px; background: white; padding: 6px 8px;
-      border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,.15);
-    }
-    .legend .swatch { display:inline-block; width:18px; height:3px; background:#e74c3c; margin-right:6px; vertical-align:middle; }
+    .msg { position:absolute; top:10px; left:10px; background:#fff; padding:6px 8px; border-radius:6px; box-shadow:0 1px 6px rgba(0,0,0,.15); font:14px/1.3 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; }
+    .legend { position:absolute; bottom:12px; left:12px; background:#fff; padding:6px 8px; border-radius:6px; box-shadow:0 1px 6px rgba(0,0,0,.15); }
+    .swatch { display:inline-block; width:18px; height:3px; background:#e74c3c; margin-right:6px; vertical-align:middle; }
   </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="msg" class="msg" style="display:none"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-  // 1) Base map centered roughly on SF (we'll auto-fit to the trail once it loads)
-  const map = L.map('map', { zoomControl: true }).setView([37.7749, -122.4194], 12);
-
+  const map = L.map('map').setView([37.7749, -122.4194], 12);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '&copy; OpenStreetMap contributors'
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
+  L.control.scale({ metric:false }).addTo(map);
 
-  L.control.scale({ metric: false }).addTo(map);
+  const showMsg = (t) => { const el = document.getElementById('msg'); el.textContent = t; el.style.display = 'block'; };
 
-  // 2) Load your trail GeoJSON (adjust path if it's in /data)
-  const TRAIL_GEOJSON_URL = './loch.levens.geojson'; // or './data/loch.levens.geojson'
+  // GeoJSON sits in the repo root
+  const GEOJSON_URL = './loch.levens.geojson?v=' + Date.now(); // cache-bust while iterating
 
-  fetch(TRAIL_GEOJSON_URL)
-    .then(r => {
-      if (!r.ok) throw new Error(`HTTP ${r.status} loading ${TRAIL_GEOJSON_URL}`);
-      return r.json();
-    })
+  fetch(GEOJSON_URL)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status} loading ${GEOJSON_URL}`); return r.json(); })
     .then(geo => {
-      const trailLayer = L.geoJSON(geo, {
-        style: feature => ({ color: '#e74c3c', weight: 3 }),
+      const trail = L.geoJSON(geo, {
+        style: { color:'#e74c3c', weight:3 },
         onEachFeature: (f, layer) => {
           const name = f?.properties?.name || 'Trail';
           layer.bindPopup(name);
         }
       }).addTo(map);
 
-      // Fit map to the trail geometry
-      const b = trailLayer.getBounds();
-      if (b.isValid()) map.fitBounds(b, { padding: [20, 20] });
-
-      // Optional: drop a trailhead marker if your GeoJSON has a "trailhead" Point or a property
-      // Example (uncomment and adapt):
-      // L.marker([39.319, -120.542]).addTo(map).bindPopup('Trailhead');
+      const b = trail.getBounds();
+      if (b.isValid()) map.fitBounds(b, { padding:[20,20] });
+      else showMsg('Loaded GeoJSON but it has no visible geometry (empty or out of range).');
     })
     .catch(err => {
       console.error(err);
-      alert('Could not load the trail GeoJSON. Check the file path and try again.');
+      showMsg('Could not load loch.levens.geojson. Check filename, path, and that it’s valid GeoJSON.');
     });
 
-  // Optional: simple legend
-  const legend = L.control({ position: 'bottomleft' });
+  // Tiny legend
+  const legend = L.control({ position:'bottomleft' });
   legend.onAdd = () => {
     const div = L.DomUtil.create('div', 'legend');
     div.innerHTML = '<div><span class="swatch"></span>Hiking trail</div>';
